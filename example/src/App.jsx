@@ -32,6 +32,14 @@ import {
 
 import { computeKMAPS } from "../../src/index.js"; // ✅ Import your KMAPS library
 
+const KMAPS_ORDER = [
+  "King Safety",
+  "Material",
+  "Activity",
+  "Pawn Structure",
+  "Space",
+];
+
 export default function App() {
   // --- 1️⃣ Initialize game state ---
   const [game, setGame] = useState(new Chess()); // `chess.js` game instance
@@ -148,30 +156,36 @@ export default function App() {
                   {/* --- Radar Chart --- */}
                   <Box sx={{ width: "100%", height: 300, mb: 2 }}>
                     <ResponsiveRadar
-                      data={kmaps.map((d) => {
-                        // Normalize the data for the radar
-                        const shortLabel = d.metric
-                          .trim()
-                          .charAt(0)
-                          .toUpperCase();
-                        const total = ["Space", "Material"].includes(d.metric)
-                          ? d.White + d.Black
-                          : 1;
+                      data={[...kmaps]
+                        .sort(
+                          (a, b) =>
+                            KMAPS_ORDER.indexOf(a.metric) -
+                            KMAPS_ORDER.indexOf(b.metric)
+                        )
+                        .map((d) => {
+                          // Normalize the data for the radar
+                          const shortLabel = d.metric
+                            .trim()
+                            .charAt(0)
+                            .toUpperCase();
+                          const total = ["Space", "Material"].includes(d.metric)
+                            ? d.White + d.Black
+                            : 1;
 
-                        return {
-                          metric: shortLabel,
-                          White:
-                            ["Space", "Material"].includes(d.metric) &&
-                            total > 0
-                              ? (d.White / total) * 100
-                              : d.White * 100,
-                          Black:
-                            ["Space", "Material"].includes(d.metric) &&
-                            total > 0
-                              ? (d.Black / total) * 100
-                              : d.Black * 100,
-                        };
-                      })}
+                          return {
+                            metric: shortLabel,
+                            White:
+                              ["Space", "Material"].includes(d.metric) &&
+                              total > 0
+                                ? (d.White / total) * 100
+                                : d.White * 100,
+                            Black:
+                              ["Space", "Material"].includes(d.metric) &&
+                              total > 0
+                                ? (d.Black / total) * 100
+                                : d.Black * 100,
+                          };
+                        })}
                       keys={["White", "Black"]}
                       indexBy="metric"
                       maxValue={100}
@@ -210,53 +224,59 @@ export default function App() {
                       </TableHead>
 
                       <TableBody>
-                        {kmaps.map((r) => {
-                          let white = r.White ?? 0.5;
-                          let black = r.Black ?? 0.5;
+                        {[...kmaps]
+                          .sort(
+                            (a, b) =>
+                              KMAPS_ORDER.indexOf(a.metric) -
+                              KMAPS_ORDER.indexOf(b.metric)
+                          )
+                          .map((r) => {
+                            let white = r.White ?? 0.5;
+                            let black = r.Black ?? 0.5;
 
-                          // Normalize space/material as proportions
-                          if (["Space", "Material"].includes(r.metric)) {
-                            const total = white + black;
-                            if (total > 0) {
-                              white = white / total;
-                              black = black / total;
+                            // Normalize space/material as proportions
+                            if (["Space", "Material"].includes(r.metric)) {
+                              const total = white + black;
+                              if (total > 0) {
+                                white = white / total;
+                                black = black / total;
+                              }
                             }
-                          }
 
-                          // Dynamic color based on value
-                          const colorValue = (v) =>
-                            v > 0.6
-                              ? "#4caf50"
-                              : v < 0.4
-                              ? "#f44336"
-                              : "#ff9800";
+                            // Dynamic color based on value
+                            const colorValue = (v) =>
+                              v > 0.6
+                                ? "#4caf50"
+                                : v < 0.4
+                                ? "#f44336"
+                                : "#ff9800";
 
-                          return (
-                            <TableRow key={r.metric}>
-                              <TableCell sx={{ fontWeight: 500 }}>
-                                {r.metric}
-                              </TableCell>
-                              <TableCell
-                                align="center"
-                                sx={{
-                                  fontWeight: 600,
-                                  color: colorValue(white),
-                                }}
-                              >
-                                {Math.round(white * 100)}%
-                              </TableCell>
-                              <TableCell
-                                align="center"
-                                sx={{
-                                  fontWeight: 600,
-                                  color: colorValue(black),
-                                }}
-                              >
-                                {Math.round(black * 100)}%
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
+                            return (
+                              <TableRow key={r.metric}>
+                                <TableCell sx={{ fontWeight: 500 }}>
+                                  {r.metric}
+                                </TableCell>
+                                <TableCell
+                                  align="center"
+                                  sx={{
+                                    fontWeight: 600,
+                                    color: colorValue(white),
+                                  }}
+                                >
+                                  {Math.round(white * 100)}%
+                                </TableCell>
+                                <TableCell
+                                  align="center"
+                                  sx={{
+                                    fontWeight: 600,
+                                    color: colorValue(black),
+                                  }}
+                                >
+                                  {Math.round(black * 100)}%
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
                       </TableBody>
                     </Table>
                   </TableContainer>
