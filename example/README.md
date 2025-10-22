@@ -8,7 +8,7 @@
 - Pawn Structure
 - Space
 
-These metrics provide a quick, explainable overview of a position’s balance without requiring a chess engine.
+These metrics provide a quick, explainable overview of a position’s balance.
 
 ---
 
