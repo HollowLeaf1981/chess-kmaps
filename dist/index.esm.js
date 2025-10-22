@@ -1,16 +1,54 @@
 import { Chess } from 'chess.js';
 
-// Common math helpers
+// -------------------------------------------------------------
+// Common Math Helpers
+// -------------------------------------------------------------
+
+/**
+ * clamp(x)
+ * -----------------------------------------
+ * Restricts a numeric value to the range [0, 1].
+ *
+ * Useful for normalizing computed metrics or ensuring
+ * values remain within valid percentage bounds.
+ *
+ * @param {number} x - Input value to be clamped.
+ * @returns {number} The input value, limited to the [0, 1] range.
+ *
+ * Example:
+ *   clamp(1.2) → 1
+ *   clamp(-0.3) → 0
+ *   clamp(0.5) → 0.5
+ */
 const clamp = (x) => Math.max(0, Math.min(1, x));
 
 /**
- * Calculates normalized Material scores for both White and Black.
+ * -------------------------------------------------------------
+ * getMaterialBoth(game)
+ * -------------------------------------------------------------
+ * Calculates the normalized Material metric for both sides.
+ *
+ * Material is based on the summed standard piece values:
+ *   Pawn = 1, Knight = 3, Bishop = 3, Rook = 5, Queen = 9, King = 0
+ *
+ * The resulting scores are normalized to the [0,1] range
+ * relative to a total material scale of 78 points:
+ *   - 39 points maximum per side (all pieces on board)
+ *   - 78 total across both sides
+ *
+ * @param {Chess} game - A chess.js instance representing the position.
+ * @returns {{ whiteMaterialScore: number, blackMaterialScore: number }}
+ *          Normalized scores for both White and Black.
  */
 function getMaterialBoth(game) {
+  // Base piece values
   const pieceValues = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
+
+  // Accumulators for total material of each side
   let w = 0,
     b = 0;
 
+  // Traverse all board squares and sum piece values
   game
     .board()
     .flat()
@@ -20,7 +58,13 @@ function getMaterialBoth(game) {
       sq.color === "w" ? (w += v) : (b += v);
     });
 
+  // Difference: positive if White leads, negative if Black leads
   const diff = w - b;
+
+  // Normalize to [0,1] range:
+  //   - Add 39 to center the difference on zero
+  //   - Divide by total (78) to map full material range
+  //   - Clamp ensures scores stay bounded
   return {
     whiteMaterialScore: clamp((diff + 39) / 78),
     blackMaterialScore: clamp((-diff + 39) / 78),
@@ -28,13 +72,32 @@ function getMaterialBoth(game) {
 }
 
 /**
- * Evaluates King Safety for a given color.
+ * -------------------------------------------------------------
+ * getKingSafety(game, color)
+ * -------------------------------------------------------------
+ * Evaluates King Safety for a given side by combining several
+ * strategic subfactors into a normalized [0,1] score.
+ *
+ * Components:
+ *   1. Pawn Shield      – protection from pawns directly in front
+ *   2. Castling/Placement – rank safety and castled positioning
+ *   3. Mobility         – number of safe adjacent squares
+ *   4. Enemy Pressure   – nearby opposing pieces and their threat potential
+ *
+ * The final score is lightly smoothed toward higher values for stability,
+ * and clamped to ensure it stays in [0,1].
+ *
+ * @param {Chess} game - A chess.js instance representing the position.
+ * @param {"w"|"b"} color - The color whose king safety to evaluate.
+ * @returns {number} Normalized safety score between 0 and 1.
  */
 function getKingSafety(game, color) {
   const board = game.board();
   let king = null;
 
-  // locate king
+  // -------------------------------------------------------------
+  // Locate the king’s coordinates (file 0–7, rank 1–8)
+  // -------------------------------------------------------------
   for (let r = 0; r < 8; r++) {
     for (let f = 0; f < 8; f++) {
       const sq = board[r][f];
@@ -42,11 +105,15 @@ function getKingSafety(game, color) {
         king = { file: f, rank: 8 - r };
     }
   }
+
+  // If the king cannot be found (invalid FEN), return a neutral score
   if (!king) return 0.5;
 
   let score = 0;
 
-  // pawn shield
+  // -------------------------------------------------------------
+  // 1. Pawn Shield — number of pawns directly in front of the king
+  // -------------------------------------------------------------
   const frontRank = color === "w" ? king.rank + 1 : king.rank - 1;
   let shield = 0;
   for (let df = -1; df <= 1; df++) {
@@ -55,36 +122,55 @@ function getKingSafety(game, color) {
     const p = game.get(sq);
     if (p?.type === "p" && p.color === color) shield++;
   }
+
+  // Normalize shield (0–3 pawns) and weight contribution
   const shieldScore = shield / 3;
   score += shieldScore * 0.45;
 
-  // castling / placement
+  // -------------------------------------------------------------
+  // 2. Castling / Placement — evaluates how exposed the king is
+  // -------------------------------------------------------------
   const kingSquare = `${String.fromCharCode(97 + king.file)}${king.rank}`;
-  const castled = color === "w" ? ["g1", "c1"] : ["g8", "c8"];
-  const isCastled = castled.includes(kingSquare);
+  const castledSquares = color === "w" ? ["g1", "c1"] : ["g8", "c8"];
+  const isCastled = castledSquares.includes(kingSquare);
+
+  // Rank safety: kings deeper in own territory score higher
   const rankSafety =
     color === "w" ? 1 - (king.rank - 1) / 7 : 1 - (8 - king.rank) / 7;
+
+  // Default placement weight
   let placement = rankSafety * 0.3;
+
+  // Bonus for being castled with an intact pawn shield
   if (isCastled && shieldScore >= 0.66) placement = 0.35;
+
   score += placement;
 
-  // mobility
+  // -------------------------------------------------------------
+  // 3. Mobility — empty adjacent squares the king can move to
+  // -------------------------------------------------------------
   let mobility = 0;
   for (let dr = -1; dr <= 1; dr++) {
     for (let df = -1; df <= 1; df++) {
       if (dr === 0 && df === 0) continue;
-      const nr = king.rank + dr,
-        nf = king.file + df;
+      const nr = king.rank + dr;
+      const nf = king.file + df;
       if (nr < 1 || nr > 8 || nf < 0 || nf > 7) continue;
       const sq = `${String.fromCharCode(97 + nf)}${nr}`;
       if (!game.get(sq)) mobility++;
     }
   }
+
+  // Weight mobility modestly (at most +0.05)
   score += (mobility / 8) * 0.05;
 
-  // enemy pressure
+  // -------------------------------------------------------------
+  // 4. Enemy Pressure — detect nearby enemy pieces and estimate threat
+  // -------------------------------------------------------------
   const enemy = color === "w" ? "b" : "w";
   let pressure = 0;
+
+  // Look in a 7×7 zone around the king (3 squares in each direction)
   for (let dr = -3; dr <= 3; dr++) {
     for (let df = -3; df <= 3; df++) {
       if (dr === 0 && df === 0) continue;
@@ -93,27 +179,68 @@ function getKingSafety(game, color) {
       if (nr < 1 || nr > 8 || nf < 0 || nf > 7) continue;
       const sq = `${String.fromCharCode(97 + nf)}${nr}`;
       const p = game.get(sq);
+
       if (p?.color === enemy) {
+        // Each piece contributes pressure inversely proportional to distance
         const val = { q: 3, r: 2, b: 1.5, n: 1.2, p: 0.8 }[p.type] || 1;
         pressure += val / (Math.abs(dr) + Math.abs(df));
       }
     }
   }
 
+  // Reduce safety based on total nearby enemy activity
+  // Cap reduction to a max of -0.25
   score -= Math.min(pressure / 10, 0.25);
+
+  // -------------------------------------------------------------
+  // Final normalization and smoothing
+  // -------------------------------------------------------------
   const finalScore = clamp(score);
+
+  // Blend linear and quadratic terms for smoother gradient
+  // (slightly rewards strong safety, dampens extremes)
   return clamp(0.7 * finalScore + 0.3 * finalScore * finalScore);
 }
 
+/**
+ * -------------------------------------------------------------
+ * getPieceActivity(game, color)
+ * -------------------------------------------------------------
+ * Evaluates the "Activity" metric for a given color — a measure
+ * of how freely that side’s pieces can move and how active
+ * they are, particularly in central areas.
+ *
+ * Activity is based on:
+ *   1. Number of available non-pawn moves.
+ *   2. Small bonus for knights and bishops occupying central squares.
+ *
+ * The score is normalized to the [0,1] range using clamp().
+ *
+ * @param {Chess} game - A chess.js instance representing the position.
+ * @param {"w"|"b"} color - The side to evaluate ("w" for White, "b" for Black).
+ * @returns {number} Normalized activity score in [0,1].
+ */
 function getPieceActivity(game, color) {
+  // Clone the position and set the side to move to the target color
+  // so that generated moves reflect that color’s mobility.
   const fenParts = game.fen().split(" ");
   fenParts[1] = color;
   const temp = new Chess(fenParts.join(" "));
 
+  // Generate all legal moves for this side
   const moves = temp.moves({ verbose: true });
+
+  // Count only non-pawn moves (pawns are excluded from activity metric)
   const nonPawn = moves.filter((m) => m.piece !== "p").length;
+
+  // Normalize raw mobility — 40 is a practical cap for open positions
   let score = Math.min(nonPawn / 40, 1);
 
+  // -------------------------------------------------------------
+  // Positional Bonus: Add small increments for knights and bishops
+  // occupying central squares (d4, d5, e4, e5). This favors
+  // active, well-placed minor pieces.
+  // -------------------------------------------------------------
   game.board().forEach((row, r) =>
     row.forEach((sq, f) => {
       if (!sq || sq.color !== color || sq.type === "p") return;
@@ -122,22 +249,46 @@ function getPieceActivity(game, color) {
     })
   );
 
+  // Clamp ensures final score stays within valid [0,1] range
   return clamp(score);
 }
 
+/**
+ * -------------------------------------------------------------
+ * isCentralSquare(sq)
+ * -------------------------------------------------------------
+ * Determines whether a given square (e.g., "d4") lies within the
+ * central 4x4 region of the chessboard (c4–f5 area).
+ *
+ * @param {string} sq - Square in algebraic format (e.g., "e4").
+ * @returns {boolean} True if square is one of the 16 central squares.
+ */
 function isCentralSquare(sq) {
-  const f = sq.charCodeAt(0) - 97;
-  const r = parseInt(sq[1], 10) - 1;
+  const f = sq.charCodeAt(0) - 97; // convert file letter to 0–7 index
+  const r = parseInt(sq[1], 10) - 1; // convert rank to 0–7 index
   return f >= 3 && f <= 4 && r >= 3 && r <= 4;
 }
 
 /**
- * Evaluates Pawn Structure quality for a given color.
- * Penalizes isolated and doubled pawns, then normalizes the score.
+ * -------------------------------------------------------------
+ * Pawn Structure Evaluation
+ * -------------------------------------------------------------
+ * Evaluates the overall quality of a given side’s pawn structure
+ * using a broad set of positional heuristics (19 total features).
+ *
+ * The system detects both static and dynamic pawn features:
+ *   - Weaknesses: isolated, doubled, backward, over-advanced pawns
+ *   - Strengths: passed pawns, chains, levers, flank majorities
+ *   - Board context: pawn islands, rams, weak squares, hanging pawns
+ *
+ * Each factor is weighted, aggregated, normalized to [0,1],
+ * and cached for reuse to optimize performance.
  */
-// ===========================
-// Pawn Structure: Utilities
-// ===========================
+
+// =============================================================
+// Core Board Utilities
+// =============================================================
+
 function squareFromRF(fileIdx, rank) {
   return `${String.fromCharCode(97 + fileIdx)}${rank}`;
 }
@@ -165,15 +316,14 @@ function filesWithPawns(game, color) {
   );
 }
 
-// Sides & steps
 function forwardStep(color) {
   return color === "w" ? 1 : -1;
 }
+
 function enemy(color) {
   return color === "w" ? "b" : "w";
 }
 
-// Pawn capture offsets (relative)
 function pawnCaptureDeltas(color) {
   return color === "w"
     ? [1, -1].map((df) => ({ df, dr: 1 }))
@@ -195,9 +345,11 @@ function countPawns(game, color) {
   return listPawns(game, color).length;
 }
 
-// =======================================
+// =============================================================
+// Pawn Structure Feature Detectors
+// =============================================================
+
 // 1) Isolated Pawns
-// =======================================
 function countIsolatedPawns(game, color) {
   const pawns = listPawns(game, color);
   const filesSet = new Set(filesWithPawns(game, color));
@@ -212,9 +364,7 @@ function countIsolatedPawns(game, color) {
   return isolated;
 }
 
-// =======================================
-// 2) Doubled/Tripled Pawns
-// =======================================
+// 2) Doubled Pawns
 function countDoubledPawns(game, color) {
   const pawns = listPawns(game, color);
   const byFile = new Map();
@@ -223,14 +373,12 @@ function countDoubledPawns(game, color) {
   }
   let doubled = 0;
   for (const [, n] of byFile) {
-    if (n >= 2) doubled += n - 1; // doubles=1, triples=2, etc.
+    if (n >= 2) doubled += n - 1;
   }
   return doubled;
 }
 
-// =======================================
 // 3) Pawn Islands
-// =======================================
 function countPawnIslands(game, color) {
   const files = filesWithPawns(game, color);
   if (files.length === 0) return 0;
@@ -241,11 +389,7 @@ function countPawnIslands(game, color) {
   return islands;
 }
 
-// =======================================
 // 4) Passed Pawns
-// Definition: No enemy pawn ahead on same/adjacent files.
-// Exclude "back twin" (rear pawn of a doubled file).
-// =======================================
 function countPassedPawns(game, color) {
   const my = listPawns(game, color);
   const opp = listEnemyPawns(game, color);
@@ -256,21 +400,19 @@ function countPassedPawns(game, color) {
   }
   for (const ranks of oppByFile.values()) ranks.sort((a, b) => a - b);
 
-  // Helper: is there an enemy pawn in "front span" on file f?
-  function enemyPawnAheadOnFile(file, fromRank) {
-    const ranks = oppByFile.get(file);
-    if (!ranks || ranks.length === 0) return false;
-    if (color === "w") return ranks.some((r) => r > fromRank);
-    return ranks.some((r) => r < fromRank);
-  }
-
-  // Is there a friendly pawn ahead on same file? (to filter "back twin")
   const myByFile = new Map();
   for (const p of my) {
     if (!myByFile.has(p.file)) myByFile.set(p.file, []);
     myByFile.get(p.file).push(p.rank);
   }
   for (const ranks of myByFile.values()) ranks.sort((a, b) => a - b);
+
+  function enemyPawnAheadOnFile(file, fromRank) {
+    const ranks = oppByFile.get(file);
+    if (!ranks || ranks.length === 0) return false;
+    if (color === "w") return ranks.some((r) => r > fromRank);
+    return ranks.some((r) => r < fromRank);
+  }
 
   function friendAheadOnFile(file, fromRank) {
     const ranks = myByFile.get(file);
@@ -281,7 +423,6 @@ function countPassedPawns(game, color) {
 
   let passers = 0;
   for (const p of my) {
-    // same + adjacent files
     const filesToCheck = [p.file, p.file - 1, p.file + 1].filter(
       (f) => f >= 0 && f <= 7
     );
@@ -289,40 +430,29 @@ function countPassedPawns(game, color) {
       enemyPawnAheadOnFile(f, p.rank)
     );
     if (hasEnemyAhead) continue;
-    // back-twin filter
     if (friendAheadOnFile(p.file, p.rank)) continue;
     passers++;
   }
   return passers;
 }
 
-// =======================================
-// 5) Candidate Passed Pawns (practical heuristic)
-// Heuristic: (a) half-open for color on its file,
-//            (b) not blocked by enemy pawn directly ahead,
-//            (c) friendly pawn defenders on adjacent files exist or can advance.
-// =======================================
+// 5) Candidate Passed Pawns
 function countCandidatePassedPawns(game, color) {
   const my = listPawns(game, color);
-
   const filesHalfOpenForColor = classifyFiles(game).halfOpen[color];
-
-  // Build quick lookup of enemy pawns by square
 
   function isBlockedByEnemyAhead(file, rank) {
     const r1 = rank + forwardStep(color);
-    if (!isOnBoard(file, r1)) return true; // off-board considered blocked
+    if (!isOnBoard(file, r1)) return true;
     const sq = squareFromRF(file, r1);
     const piece = game.get(sq);
-    return !!piece; // conservative: any piece blocks (you can refine)
+    return !!piece;
   }
 
   function hasFriendlyPotentialSupport(file, rank) {
-    // Friendly pawn on file±1 that is behind or can step to defend capture squares
     for (const df of [-1, 1]) {
       const f2 = file + df;
       if (f2 < 0 || f2 > 7) continue;
-      // any friendly pawn behind that could advance next moves?
       if (color === "w") {
         for (let r = rank - 1; r >= 2; r--) {
           if (squareHasPawn(game, color, f2, r)) return true;
@@ -347,17 +477,10 @@ function countCandidatePassedPawns(game, color) {
   return count;
 }
 
-// =======================================
-// 6) Backward Pawns (heuristic)
-// Conditions (practical):
-//  - No friendly pawn can support it from adjacent file (behind and able to advance).
-//  - Stop square (one ahead) not defended by friendly pawn control.
-//  - Stop square controlled by enemy pawn (or strongly controlled).
-// =======================================
+// 6) Backward Pawns
 function countBackwardPawns(game, color) {
   const my = listPawns(game, color);
 
-  // Build pawn-control maps (only pawn attacks)
   function pawnControls(colorToMap) {
     const ctr = new Set();
     for (const p of listPawns(game, colorToMap)) {
@@ -377,7 +500,6 @@ function countBackwardPawns(game, color) {
     for (const df of [-1, 1]) {
       const f2 = file + df;
       if (f2 < 0 || f2 > 7) continue;
-      // friendly pawn behind that can advance up to defend later
       if (color === "w") {
         for (let r = rank - 1; r >= 2; r--) {
           if (squareHasPawn(game, color, f2, r)) return true;
@@ -395,27 +517,16 @@ function countBackwardPawns(game, color) {
   for (const p of my) {
     const stopSq = squareFromRF(p.file, p.rank + forwardStep(color));
     if (!isOnBoard(p.file, p.rank + forwardStep(color))) continue;
-
-    // (a) cannot be supported by adjacent friendly pawn from behind
     if (canBeSupportedFromBehind(p.file, p.rank)) continue;
-
-    // (b) stop square NOT defended by friendly pawn
     const stopDefendedByOwnPawn = myPawnCtrl.has(stopSq);
-
     if (stopDefendedByOwnPawn) continue;
-
-    // (c) stop square controlled by enemy pawn
     const stopControlledByEnemyPawn = oppPawnCtrl.has(stopSq);
-
     if (stopControlledByEnemyPawn) count++;
   }
   return count;
 }
 
-// =======================================
-// 7) Hanging Pawns (duo on adjacent files, typically advanced,
-//    half-open surroundings; simplified practical rule.)
-// =======================================
+// 7) Hanging Pawns
 function countHangingPawns(game, color) {
   const my = listPawns(game, color);
   const myByFile = new Map();
@@ -434,54 +545,40 @@ function countHangingPawns(game, color) {
     const hasOnF = !!myByFile.get(f);
     const hasOnF2 = !!myByFile.get(f2);
     if (!hasOnF || !hasOnF2) continue;
-
-    // Advanced ranks heuristic: White ≥ 4th; Black ≤ 5th (mirror)
     const ranksF = myByFile.get(f);
     const ranksF2 = myByFile.get(f2);
     const advancedPair =
       color === "w"
         ? ranksF.some((r) => r >= 4) && ranksF2.some((r) => r >= 4)
         : ranksF.some((r) => r <= 5) && ranksF2.some((r) => r <= 5);
-
     if (!advancedPair) continue;
-
-    // Surrounding files half-open for this color helps define "hanging"
     const leftOpen = f - 1 >= 0 ? halfOpenForColor.has(f - 1) : true;
     const rightOpen = f2 + 1 <= 7 ? halfOpenForColor.has(f2 + 1) : true;
-
     if (leftOpen && rightOpen) count++;
   }
   return count;
 }
 
-// =======================================
-// 8) Pawn Chains (return array of chains, each is array of pawn squares)
-// A pawn q defends a pawn r if r is one step forward-diagonal from q.
-// =======================================
+// 8) Pawn Chains
 function getPawnChains(game, color) {
   const my = listPawns(game, color);
   const visited = new Set();
-
   function defends(p, q) {
     const df1 = q.file - p.file;
     const dr1 = q.rank - p.rank;
     const drExpected = forwardStep(color);
     return Math.abs(df1) === 1 && dr1 === drExpected;
   }
-
   const chains = [];
   for (const p of my) {
     if (visited.has(p.square)) continue;
     const chain = [p];
     visited.add(p.square);
-
-    // Try to walk forward along defenders
     let expanded = true;
     while (expanded) {
       expanded = false;
       for (const r of my) {
         if (visited.has(r.square)) continue;
-        // if last in chain defends r, append
         if (defends(chain[chain.length - 1], r)) {
           chain.push(r);
           visited.add(r.square);
@@ -499,19 +596,15 @@ function countPawnChains(game, color) {
 }
 
 function detectChainBases(game, color) {
-  // Base = pawn in a chain that is NOT defended by another pawn of same color
   const chains = getPawnChains(game, color);
   const bases = [];
   for (const chain of chains) {
-    // by construction, the first element wasn't defended in our builder
     bases.push(chain[0]);
   }
   return bases;
 }
 
-// =======================================
-// 9) Pawn Rams (blocked opposing pawns on same file, adjacent ranks)
-// =======================================
+// 9) Pawn Rams
 function countPawnRams(game) {
   const white = listPawns(game, "w");
   const blackByFile = new Map();
@@ -528,9 +621,7 @@ function countPawnRams(game) {
   return rams;
 }
 
-// =======================================
-// 10) Pawn Levers (potential captures vs enemy pawns)
-// =======================================
+// 10) Pawn Levers
 function countPawnLevers(game, color) {
   const my = listPawns(game, color);
   let levers = 0;
@@ -541,26 +632,19 @@ function countPawnLevers(game, color) {
       if (!isOnBoard(f2, r2)) continue;
       const sq = squareFromRF(f2, r2);
       const piece = game.get(sq);
-      if (piece?.type === "p" && piece.color === enemy(color)) {
-        levers++;
-      }
+      if (piece?.type === "p" && piece.color === enemy(color)) levers++;
     }
   }
   return levers;
 }
 
-// =======================================
-// 11) File Classification: open / half-open / closed
-// Returns { open: Set<fileIdx>, halfOpen: { w:Set, b:Set }, closed: Set }
-// =======================================
+// 11) File Classification
 function classifyFiles(game) {
   const whiteFiles = new Set(filesWithPawns(game, "w"));
   const blackFiles = new Set(filesWithPawns(game, "b"));
-
   const open = new Set();
   const closed = new Set();
   const halfOpen = { w: new Set(), b: new Set() };
-
   for (let f = 0; f < 8; f++) {
     const hasW = whiteFiles.has(f);
     const hasB = blackFiles.has(f);
@@ -572,22 +656,15 @@ function classifyFiles(game) {
   return { open, halfOpen, closed };
 }
 
-// =======================================
-// 12) Pawn Majority / Minority (simple flank counts)
-// =======================================
+// 12) Pawn Majorities
 function detectPawnMajority(game, color) {
   const my = listPawns(game, color);
   const opp = listEnemyPawns(game, color);
-
-  const myQ = my.filter((p) => p.file <= 2).length; // a..c
-  const myK = my.filter((p) => p.file >= 5).length; // f..h
+  const myQ = my.filter((p) => p.file <= 2).length;
+  const myK = my.filter((p) => p.file >= 5).length;
   const opQ = opp.filter((p) => p.file <= 2).length;
   const opK = opp.filter((p) => p.file >= 5).length;
-
-  return {
-    queensideMajority: myQ > opQ,
-    kingsideMajority: myK > opK,
-  };
+  return { queensideMajority: myQ > opQ, kingsideMajority: myK > opK };
 }
 
 function detectMinority(game, color) {
@@ -598,16 +675,13 @@ function detectMinority(game, color) {
   };
 }
 
-// =======================================
-// 13) Weak pawns aggregate (isolated + backward + over-advanced)
-// =======================================
+// 13) Over-Advanced Pawns
 function countOverAdvancedPawns(game, color) {
   const my = listPawns(game, color);
   let count = 0;
   for (const p of my) {
     const advanced = color === "w" ? p.rank >= 6 : p.rank <= 3;
     if (!advanced) continue;
-    // No friendly pawn on adjacent files that can come up to support
     let support = false;
     for (const df of [-1, 1]) {
       const f2 = p.file + df;
@@ -634,6 +708,7 @@ function countOverAdvancedPawns(game, color) {
   return count;
 }
 
+// 14) Weak Pawns (isolated + backward + over-advanced)
 function countWeakPawns(game, color) {
   const isolated = countIsolatedPawns(game, color);
   const backward = countBackwardPawns(game, color);
@@ -641,13 +716,11 @@ function countWeakPawns(game, color) {
   return isolated + backward + overAdv;
 }
 
-// =======================================
-// 14) Central doubled pawns (d/e files)
-// =======================================
+// 15) Central Doubled Pawns
 function countCentralDoubledPawns(game, color) {
   const pawns = listPawns(game, color).filter(
     (p) => p.file === 3 || p.file === 4
-  ); // d or e
+  );
   const byFile = new Map();
   for (const p of pawns) byFile.set(p.file, (byFile.get(p.file) || 0) + 1);
   let doubled = 0;
@@ -657,24 +730,15 @@ function countCentralDoubledPawns(game, color) {
   return doubled;
 }
 
-// =======================================
-// 15) Weak squares (holes): squares that cannot be defended by a pawn
-// Simplified heuristic: within your half, squares for which no friendly pawn
-// can ever attack (i.e., no pawn on adjacent file behind that can advance).
-// Returns count (or you can return a set if you prefer).
-// =======================================
+// 16) Weak Squares
 function detectWeakSquares(game, color) {
   const weak = new Set();
-
   function friendlyPawnCanGuardSquare(file, rank) {
-    // A friendly pawn guards (attacks) (file, rank) if it could be on
-    // (file±1, rank - forwardStep(color)) and move forward to attack later.
     const step = forwardStep(color);
     for (const df of [-1, 1]) {
-      const f2 = file - df; // inverse mapping from target to pawn file
-      const r2 = rank - step; // one step behind in pawn direction
+      const f2 = file - df;
+      const r2 = rank - step;
       if (!isOnBoard(f2, r2)) continue;
-      // Is there (or could there be) a pawn on (f2, <= r2) that might reach?
       if (color === "w") {
         for (let r = r2; r >= 2; r--) {
           if (squareHasPawn(game, color, f2, r)) return true;
@@ -687,26 +751,21 @@ function detectWeakSquares(game, color) {
     }
     return false;
   }
-
-  // Scan your own half; central squares matter most, but we keep general.
   const ranksToScan = color === "w" ? [1, 2, 3, 4] : [8, 7, 6, 5];
   for (const r of ranksToScan) {
     for (let f = 0; f < 8; f++) {
-      if (!friendlyPawnCanGuardSquare(f, r)) {
-        weak.add(squareFromRF(f, r));
-      }
+      if (!friendlyPawnCanGuardSquare(f, r)) weak.add(squareFromRF(f, r));
     }
   }
-  return weak; // set of squares
+  return weak;
 }
 
-// =======================================
-// 16–18) Pawn Hash infra (lightweight)
-// =======================================
-const _pawnTT = new Map(); // simple in-memory cache
+// =============================================================
+// Pawn Structure Cache
+// =============================================================
+const _pawnTT = new Map();
 
 function computePawnKey(game) {
-  // Zobrist would be ideal; here a stable string of pawn locations:
   const wp = listPawns(game, "w")
     .map((p) => p.square)
     .sort()
@@ -728,42 +787,29 @@ function storePawnStructure(game, data) {
   _pawnTT.set(k, data);
 }
 
-// =======================================
-// 19) Aggregation: getPawnStructureForColor (extended)
-// (You can keep your existing one; this is the "complete" version
-//  that uses all detectors' counts ready for weighting.)
-// =======================================
+// =============================================================
+// Aggregator
+// =============================================================
 function getPawnStructureForColor(game, color) {
-  // --- 🧠 Check pawn-structure cache ---
-  // Each pawn placement (for both colors) gets one cache key.
-  // We store { w: <score>, b: <score> } per pawn layout.
   const cached = getCachedPawnStructure(game);
   if (cached && typeof cached[color] === "number") {
     return clamp(cached[color]);
   }
 
   const total = countPawns(game, color) || 1;
-
-  // --- Static weaknesses ---
   const isolated = countIsolatedPawns(game, color);
   const doubled = countDoubledPawns(game, color);
   const islands = countPawnIslands(game, color);
   const backward = countBackwardPawns(game, color);
   const overAdv = countOverAdvancedPawns(game, color);
   const centralD = countCentralDoubledPawns(game, color);
-
-  // --- Positives ---
   const passed = countPassedPawns(game, color);
   const candPassed = countCandidatePassedPawns(game, color);
   const chains = countPawnChains(game, color);
-  const bases = detectChainBases(game, color).length; // bases usually weakness ⇒ small minus
+  const bases = detectChainBases(game, color).length;
   const levers = countPawnLevers(game, color);
-
-  // --- Dynamic interactions ---
   const rams = countPawnRams(game);
   const hanging = countHangingPawns(game, color);
-
-  // --- Context / board-wide features ---
   const weakSq = detectWeakSquares(game, color).size;
   const { queensideMajority, kingsideMajority } = detectPawnMajority(
     game,
@@ -772,17 +818,14 @@ function getPawnStructureForColor(game, color) {
   const minorities = detectMinority(game, color);
   const weak = countWeakPawns(game, color);
 
-  // --- Derived flank multipliers (small bonuses) ---
   const flankBonus =
     (queensideMajority ? 0.02 : 0) +
     (kingsideMajority ? 0.02 : 0) -
     (minorities.queensideMinority ? 0.02 : 0) -
     (minorities.kingsideMinority ? 0.02 : 0);
 
-  // --- Aggregate scoring ---
   let score =
     1 -
-    // Structural weaknesses (penalties)
     0.4 * (isolated / total) -
     0.55 * (doubled / total) -
     0.25 * (backward / total) -
@@ -794,43 +837,72 @@ function getPawnStructureForColor(game, color) {
     0.1 * (weakSq / 8) -
     0.05 * (hanging / 4) -
     0.1 * (rams / 8) +
-    // Positives
     0.4 * (passed / total) +
     0.15 * (candPassed / total) +
     0.1 * (chains / 4) +
     0.05 * (levers / total) +
-    // Contextual
     flankBonus;
 
   const result = clamp(score);
-
-  // --- 💾 Store computed score in pawn cache ---
   const prev = getCachedPawnStructure(game) || {};
   storePawnStructure(game, { ...prev, [color]: result });
-
   return result;
 }
 
+// -------------------------------------------------------------
+// Space Metric
+// -------------------------------------------------------------
+// Evaluates how much "space" a given side controls on the board.
+// The metric combines three weighted components:
+//   1. Reach Score   – number of reachable squares in the opponent’s half
+//   2. Presence Score – how many of own pieces physically occupy that half
+//   3. Foothold Score – control and occupation of central files in enemy half
+//
+// The result is normalized to [0,1] using clamp().
+// -------------------------------------------------------------
+
+
+/**
+ * getSpaceForColor(game, color)
+ * -----------------------------------------
+ * Computes the normalized space control score for a given color.
+ *
+ * @param {Chess} game - A chess.js instance representing the current position.
+ * @param {"w"|"b"} color - The color to evaluate.
+ * @returns {number} A value between 0 and 1, representing relative space control.
+ */
 function getSpaceForColor(game, color) {
+  // Clone the position but set the side to move to the target color
+  // so move generation is done from that perspective
   const fenParts = game.fen().split(" ");
   fenParts[1] = color;
   const temp = new Chess(fenParts.join(" "));
 
+  // Define opponent’s half of the board depending on color
   const oppHalfRankMin = color === "w" ? 5 : 1;
   const oppHalfRankMax = color === "w" ? 8 : 4;
 
+  // -------------------------------------------------------------
+  // 1. Reach Score — count how many unique squares this side’s
+  // non-king pieces can reach in the opponent’s half.
+  // -------------------------------------------------------------
   const moves = temp.moves({ verbose: true });
   const reachSquares = new Set(
     moves
-      .filter((m) => m.piece !== "k")
+      .filter((m) => m.piece !== "k") // ignore king moves
       .filter((m) => {
         const r = parseInt(m.to[1], 10);
         return r >= oppHalfRankMin && r <= oppHalfRankMax;
       })
       .map((m) => m.to)
   );
+  // Max possible coverage of 28 squares (approx half board)
   const reachScore = Math.min(reachSquares.size / 28, 1);
 
+  // -------------------------------------------------------------
+  // 2. Presence Score — proportion of own piece weight
+  // physically occupying the opponent’s half.
+  // -------------------------------------------------------------
   let presence = 0,
     maxPresence = 0;
   const weights = { p: 1, n: 0.8, b: 0.8, r: 0.6, q: 0.5, k: 0.2 };
@@ -846,6 +918,10 @@ function getSpaceForColor(game, color) {
   );
   const presenceScore = maxPresence > 0 ? presence / maxPresence : 0;
 
+  // -------------------------------------------------------------
+  // 3. Foothold Score — measures how many of the player’s pieces
+  // occupy or control central files (c–f) in the opponent’s half.
+  // -------------------------------------------------------------
   const centralFiles = new Set(["c", "d", "e", "f"]);
   let foothold = 0,
     footholdDen = 0;
@@ -861,32 +937,70 @@ function getSpaceForColor(game, color) {
   );
   const footholdScore = footholdDen > 0 ? foothold / footholdDen : 0;
 
+  // -------------------------------------------------------------
+  // Combine all components with tuned weights:
+  //   55% reach + 30% presence + 15% foothold
+  // -------------------------------------------------------------
   return clamp(0.55 * reachScore + 0.3 * presenceScore + 0.15 * footholdScore);
 }
 
+// Import chess.js for FEN parsing and position validation
+
 /**
- * Compute normalized K-MAPS metrics for both sides.
+ * -----------------------------------------
+ * Function: computeKMAPS(fen)
+ * -----------------------------------------
+ * Computes the five K-MAPS metrics — Material, King Safety, Activity,
+ * Pawn Structure, and Space — for both White and Black based on a given FEN.
+ *
+ * Each metric returns a normalized value between 0 and 1,
+ * allowing easy comparison across different positions.
+ *
+ * @param {string} fen - A valid FEN string representing a chess position.
+ * @returns {Array<Object>} A list of metric objects in the form:
+ *   [
+ *     { metric: "Material", White: 0.5, Black: 0.5 },
+ *     { metric: "King Safety", White: 0.7, Black: 0.6 },
+ *     ...
+ *   ]
+ *   Returns an empty array [] if the FEN is invalid.
  */
 function computeKMAPS(fen) {
+  // Validate input type
   if (!fen || typeof fen !== "string") return [];
 
   let game;
   try {
+    // Attempt to load the position using chess.js
+    // This ensures FEN validity and initializes piece data
     game = new Chess(fen);
   } catch {
+    // If the FEN is invalid or unparsable, return an empty result set
     return [];
   }
 
+  // --- Compute individual submetrics for both sides ---
+
+  // Material balance
   const { whiteMaterialScore, blackMaterialScore } = getMaterialBoth(game);
+
+  // King safety evaluation
   const kingW = getKingSafety(game, "w");
   const kingB = getKingSafety(game, "b");
+
+  // Piece activity / mobility
   const actW = getPieceActivity(game, "w");
   const actB = getPieceActivity(game, "b");
+
+  // Pawn structure quality
   const pawnW = getPawnStructureForColor(game, "w");
   const pawnB = getPawnStructureForColor(game, "b");
+
+  // Spatial control (territory)
   const spaceW = getSpaceForColor(game, "w");
   const spaceB = getSpaceForColor(game, "b");
 
+  // --- Aggregate and return normalized K-MAPS results ---
   return [
     {
       metric: "Material",
