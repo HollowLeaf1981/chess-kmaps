@@ -1,0 +1,10 @@
+example/
+src/
+rollup.config.js
+*.config.js
+*.html
+*.jsx
+*.test.js
+node_modules/
+.DS_Store
+.gitignore
