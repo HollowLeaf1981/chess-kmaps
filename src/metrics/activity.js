@@ -24,6 +24,7 @@ export function getPieceActivity(game, color) {
   // so that generated moves reflect that color’s mobility.
   const fenParts = game.fen().split(" ");
   fenParts[1] = color;
+  fenParts[3] = "-"; // clear EP square when changing side-to-move
   const temp = new Chess(fenParts.join(" "));
 
   // Generate all legal moves for this side

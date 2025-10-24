@@ -27,6 +27,7 @@ export function getSpaceForColor(game, color) {
   // so move generation is done from that perspective
   const fenParts = game.fen().split(" ");
   fenParts[1] = color;
+  fenParts[3] = "-"; // clear EP square when changing side-to-move
   const temp = new Chess(fenParts.join(" "));
 
   // Define opponent’s half of the board depending on color
